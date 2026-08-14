@@ -75,26 +75,32 @@ export const TestItem = ({
   ]
 
   useEffect(() => {
-    let unlistenFn: UnlistenFn | null = null
+    let unlistenTestAll: UnlistenFn | null = null
+    let unlistenProfileChanged: UnlistenFn | null = null
 
     const setupListener = async () => {
-      if (unlistenFn) {
-        unlistenFn()
-      }
-      unlistenFn = await addListener('verge://test-all', () => {
+      unlistenTestAll?.()
+      unlistenProfileChanged?.()
+      unlistenTestAll = await addListener('verge://test-all', () => {
         onDelay()
+      })
+      // A delay belongs to the active profile, not to the website card. Do
+      // not carry an old profile's Timeout/success into the next one.
+      unlistenProfileChanged = await addListener('profile-changed', () => {
+        setDelay(-1)
       })
     }
 
     setupListener()
 
     return () => {
-      if (unlistenFn) {
+      if (unlistenTestAll) {
         debugLog(
           `TestItem for ${id} unmounting or url changed, cleaning up test-all listener.`,
         )
-        unlistenFn()
+        unlistenTestAll()
       }
+      unlistenProfileChanged?.()
     }
   }, [url, addListener, onDelay, id])
 

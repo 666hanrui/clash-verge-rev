@@ -140,7 +140,9 @@ export const AppDataProvider = ({
       }
       lastProfileId = newProfileId
       lastProfileUpdateTime = now
-      void revalidateQueries([['getProfiles']])
+      // The exit IP is cached for five minutes. It must be refreshed when the
+      // profile changes, otherwise the home page shows the previous node's IP.
+      void revalidateQueries([['getProfiles'], ['cv_ip_info_cache']])
     }
 
     const handleRefreshProxy = () => {
@@ -247,12 +249,22 @@ export const AppDataProvider = ({
       if (!verge || !clashConfig) return '-'
 
       const isPacMode = verge.proxy_auto_config ?? false
+      const selectedListener = verge.multi_proxy_listeners?.find(
+        (listener) =>
+          listener.name === verge.system_proxy_listener &&
+          listener.enabled !== false &&
+          (listener.type === 'mixed' || listener.type === 'http'),
+      )
+      const proxyHost =
+        selectedListener?.listen || verge.proxy_host || '127.0.0.1'
+      const proxyPort =
+        selectedListener?.port ||
+        verge.verge_mixed_port ||
+        clashConfig.mixedPort ||
+        7897
 
       if (isPacMode) {
         // PAC模式：显示我们期望设置的代理地址
-        const proxyHost = verge.proxy_host || '127.0.0.1'
-        const proxyPort =
-          verge.verge_mixed_port || clashConfig.mixedPort || 7897
         return `${proxyHost}:${proxyPort}`
       } else {
         // HTTP代理模式：优先使用系统地址，但如果格式不正确则使用期望地址
@@ -265,9 +277,6 @@ export const AppDataProvider = ({
           return systemServer
         } else {
           // 系统地址无效，返回期望的代理地址
-          const proxyHost = verge.proxy_host || '127.0.0.1'
-          const proxyPort =
-            verge.verge_mixed_port || clashConfig.mixedPort || 7897
           return `${proxyHost}:${proxyPort}`
         }
       }

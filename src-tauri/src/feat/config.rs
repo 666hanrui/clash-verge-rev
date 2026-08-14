@@ -74,6 +74,7 @@ fn determine_update_flags(patch: &IVerge) -> UpdateFlags {
     let tun_mode = patch.enable_tun_mode;
     let auto_launch = patch.enable_auto_launch;
     let system_proxy = patch.enable_system_proxy;
+    let system_proxy_listener = &patch.system_proxy_listener;
     let pac = patch.proxy_auto_config;
     let pac_content = &patch.pac_file_content;
     let proxy_bypass = &patch.system_proxy_bypass;
@@ -98,6 +99,7 @@ fn determine_update_flags(patch: &IVerge) -> UpdateFlags {
     let socks_port = patch.verge_socks_port;
     let http_enabled = patch.verge_http_enabled;
     let http_port = patch.verge_port;
+    let multi_proxy_listeners = &patch.multi_proxy_listeners;
     #[cfg(target_os = "macos")]
     let enable_tray_speed = patch.enable_tray_speed;
     #[cfg(not(target_os = "macos"))]
@@ -122,6 +124,7 @@ fn determine_update_flags(patch: &IVerge) -> UpdateFlags {
         || socks_port.is_some()
         || http_port.is_some()
         || mixed_port.is_some()
+        || multi_proxy_listeners.is_some()
         || enable_external_controller.is_some();
     #[cfg(not(target_os = "windows"))]
     let mut restart_core_needed = socks_enabled.is_some()
@@ -129,6 +132,7 @@ fn determine_update_flags(patch: &IVerge) -> UpdateFlags {
         || socks_port.is_some()
         || http_port.is_some()
         || mixed_port.is_some()
+        || multi_proxy_listeners.is_some()
         || enable_external_controller.is_some();
     #[cfg(not(target_os = "windows"))]
     {
@@ -153,7 +157,7 @@ fn determine_update_flags(patch: &IVerge) -> UpdateFlags {
     if auto_launch.is_some() {
         update_flags.insert(UpdateFlags::LAUNCH);
     }
-    if system_proxy.is_some() {
+    if system_proxy.is_some() || system_proxy_listener.is_some() {
         update_flags.insert(UpdateFlags::SYS_PROXY | UpdateFlags::GROUP_SYS_TRAY);
     }
     if proxy_bypass.is_some()

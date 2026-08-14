@@ -40,6 +40,10 @@ import {
   BaseStyledTextField,
   type DialogRef,
 } from '@/components/base'
+import {
+  DirectProxyImportViewer,
+  type DirectProxyImportViewerRef,
+} from '@/components/profile/direct-proxy-import-viewer'
 import { ProfileMore } from '@/components/profile/profile-more'
 import {
   ProfileViewer,
@@ -260,6 +264,7 @@ const ProfilePage = () => {
   const mutateLogs = useCallback(() => refetchLogsRef.current(), [])
 
   const viewerRef = useRef<ProfileViewerRef>(null)
+  const directImportRef = useRef<DirectProxyImportViewerRef>(null)
   const configRef = useRef<DialogRef>(null)
 
   // distinguish type
@@ -793,6 +798,14 @@ const ProfilePage = () => {
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
           {!batchMode ? (
             <>
+              <Button
+                size="small"
+                variant="outlined"
+                onClick={() => directImportRef.current?.open()}
+              >
+                节点 / JSON
+              </Button>
+
               {/* Batch mode toggle button */}
               <IconButton
                 size="small"
@@ -959,6 +972,14 @@ const ProfilePage = () => {
           {t('profiles.page.actions.import')}
         </Button>
         <Button
+          variant="outlined"
+          size="small"
+          sx={{ borderRadius: '6px', whiteSpace: 'nowrap' }}
+          onClick={() => directImportRef.current?.open()}
+        >
+          节点 / JSON
+        </Button>
+        <Button
           variant="contained"
           size="small"
           sx={{ borderRadius: '6px' }}
@@ -1070,6 +1091,16 @@ const ProfilePage = () => {
         onChange={async (isActivating) => {
           mutateProfiles()
           // 只有更改当前激活的配置时才触发全局重新加载
+          if (isActivating) {
+            await onEnhance(false)
+          }
+        }}
+      />
+      <DirectProxyImportViewer
+        ref={directImportRef}
+        isFirstProfile={!profiles.current}
+        onImported={async (isActivating) => {
+          await mutateProfiles()
           if (isActivating) {
             await onEnhance(false)
           }

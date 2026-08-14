@@ -94,6 +94,10 @@ pub struct IVerge {
     /// set system proxy
     pub enable_system_proxy: Option<bool>,
 
+    /// The graphical multi-port listener currently assigned to the OS proxy.
+    /// Only one listener can be selected at a time.
+    pub system_proxy_listener: Option<String>,
+
     /// enable proxy guard
     pub enable_proxy_guard: Option<bool>,
 
@@ -206,6 +210,10 @@ pub struct IVerge {
 
     pub verge_http_enabled: Option<bool>,
 
+    /// Additional Mihomo listeners managed from the graphical multi-port page.
+    /// Each listener can send its inbound traffic directly to a proxy/group.
+    pub multi_proxy_listeners: Option<Vec<IMultiProxyListener>>,
+
     /// WebDAV 配置 (加密存储)
     #[serde(
         serialize_with = "serialize_encrypted",
@@ -257,6 +265,22 @@ pub struct IVerge {
 
     /// 启用外部控制器
     pub enable_external_controller: Option<bool>,
+}
+
+#[derive(Default, Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct IMultiProxyListener {
+    pub name: String,
+    pub r#type: String,
+    pub port: u16,
+    pub proxy: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile_uid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub listen: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub udp: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
 }
 
 #[derive(Default, Debug, Clone, Deserialize, Serialize)]
@@ -512,7 +536,9 @@ impl IVerge {
         patch!(verge_socks_enabled);
         patch!(verge_port);
         patch!(verge_http_enabled);
+        patch!(multi_proxy_listeners);
         patch!(enable_system_proxy);
+        patch!(system_proxy_listener);
         patch!(enable_proxy_guard);
         patch!(enable_bypass_check);
         patch!(use_default_bypass);

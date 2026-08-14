@@ -861,6 +861,17 @@ interface IProxyConfig
     | 'sudoku'
 }
 
+interface IMultiProxyListener {
+  name: string
+  type: 'mixed' | 'socks' | 'http'
+  port: number
+  proxy: string
+  profile_uid?: string
+  listen?: string
+  udp?: boolean
+  enabled?: boolean
+}
+
 interface IVergeConfig {
   app_log_level?: 'trace' | 'debug' | 'info' | 'warn' | 'error' | string
   app_log_max_size?: number // KB
@@ -899,6 +910,8 @@ interface IVergeConfig {
   enable_auto_launch?: boolean
   enable_silent_start?: boolean
   enable_system_proxy?: boolean
+  /** Selected graphical listener used by the operating system proxy. */
+  system_proxy_listener?: string
   enable_global_hotkey?: boolean
   enable_dns_settings?: boolean
   proxy_auto_config?: boolean
@@ -914,6 +927,7 @@ interface IVergeConfig {
   verge_tproxy_enabled?: boolean
   verge_socks_enabled?: boolean
   verge_http_enabled?: boolean
+  multi_proxy_listeners?: IMultiProxyListener[]
   enable_proxy_guard?: boolean
   enable_bypass_check?: boolean
   use_default_bypass?: boolean

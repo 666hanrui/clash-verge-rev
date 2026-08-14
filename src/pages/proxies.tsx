@@ -1,13 +1,17 @@
 import { LanOutlined, LanRounded, WarningRounded } from '@mui/icons-material'
 import { Box, Button, ButtonGroup } from '@mui/material'
 import { useLockFn } from 'ahooks'
-import { useCallback, useEffect, useReducer, useState } from 'react'
+import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { closeAllConnections } from 'tauri-plugin-mihomo-api'
 
 import { BasePage, TooltipIcon } from '@/components/base'
 import { ProviderButton } from '@/components/proxy/provider-button'
 import { ProxyGroups } from '@/components/proxy/proxy-groups'
+import {
+  MultiProxyPortViewer,
+  type MultiProxyPortViewerRef,
+} from '@/components/setting/mods/multi-proxy-port-viewer'
 import { useVerge } from '@/hooks/use-verge'
 import {
   useAppRefreshers,
@@ -51,7 +55,8 @@ const ProxyPage = () => {
   const updateChainConfigData = useCallback((value: string | null) => {
     dispatchChainConfigData(value)
   }, [])
-  const { verge } = useVerge()
+  const { verge, patchVerge } = useVerge()
+  const multiProxyPortRef = useRef<MultiProxyPortViewerRef>(null)
 
   const normalizedMode = clashConfig?.mode?.toLowerCase()
   const curMode = isMode(normalizedMode) ? normalizedMode : undefined
@@ -88,6 +93,22 @@ const ProxyPage = () => {
         console.error('Failed to clear chain configuration:', error)
       }
     }
+  })
+
+  const onEnableAllListeners = useLockFn(async () => {
+    const listeners = verge?.multi_proxy_listeners ?? []
+    if (!listeners.length) {
+      multiProxyPortRef.current?.open()
+      showNotice.info('请先为订阅添加一个独立代理端口')
+      return
+    }
+    await patchVerge({
+      multi_proxy_listeners: listeners.map((listener) => ({
+        ...listener,
+        enabled: true,
+      })),
+    })
+    showNotice.success(`已一键开启 ${listeners.length} 个独立代理端口`)
   })
 
   // 当开启链式代理模式时，获取配置数据
@@ -163,6 +184,21 @@ const ProxyPage = () => {
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
           <ProviderButton />
 
+          <Button
+            size="small"
+            variant="outlined"
+            onClick={() => multiProxyPortRef.current?.open()}
+          >
+            多端口代理
+          </Button>
+          <Button
+            size="small"
+            variant="contained"
+            onClick={() => void onEnableAllListeners()}
+          >
+            一键开启全部
+          </Button>
+
           <ButtonGroup size="small">
             {MODES.map((mode) => (
               <Button
@@ -199,6 +235,7 @@ const ProxyPage = () => {
         isChainMode={isChainMode}
         chainConfigData={chainConfigData}
       />
+      <MultiProxyPortViewer ref={multiProxyPortRef} />
     </BasePage>
   )
 }

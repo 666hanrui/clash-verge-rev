@@ -38,7 +38,6 @@ import { Outlet, useLocation, useNavigate } from 'react-router'
 
 import iconDark from '@/assets/image/icon_dark.svg?react'
 import iconLight from '@/assets/image/icon_light.svg?react'
-import LogoSvg from '@/assets/image/logo.svg?react'
 import { BaseErrorBoundary, BaseLoading } from '@/components/base'
 import { LayoutItem } from '@/components/layout/layout-item'
 import { LayoutTraffic } from '@/components/layout/layout-traffic'
@@ -362,7 +361,18 @@ const Layout = () => {
                   }}
                   inheritViewBox
                 />
-                <LogoSvg fill={isDark ? 'white' : 'black'} />
+                <Box
+                  component="span"
+                  sx={{
+                    fontSize: 23,
+                    fontWeight: 800,
+                    letterSpacing: '-0.8px',
+                    color: isDark ? 'common.white' : 'common.black',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  Clash Hev
+                </Box>
               </div>
               <UpdateButton className="the-newbtn" />
             </div>

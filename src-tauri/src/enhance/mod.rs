@@ -13,9 +13,9 @@ use self::{
     seq::{SeqMap, use_seq},
     tun::use_tun,
 };
-use crate::utils::dirs;
+use crate::utils::{dirs, help};
 use crate::{
-    config::{Config, IVerge, PrfItem},
+    config::{Config, IMultiProxyListener, IVerge, PrfItem},
     constants,
     utils::tmpl,
 };
@@ -36,6 +36,7 @@ struct ConfigValues {
     socks_enabled: bool,
     http_enabled: bool,
     enable_dns_settings: bool,
+    multi_proxy_listeners: Vec<IMultiProxyListener>,
     #[cfg(not(target_os = "windows"))]
     redir_enabled: bool,
     #[cfg(target_os = "linux")]
@@ -116,16 +117,26 @@ async fn get_config_values() -> ConfigValues {
         ref verge_socks_enabled,
         ref verge_http_enabled,
         ref enable_dns_settings,
+        ref multi_proxy_listeners,
         ..
     } = **verge_arc;
 
-    let (clash_core, enable_tun, enable_builtin, socks_enabled, http_enabled, enable_dns_settings) = (
+    let (
+        clash_core,
+        enable_tun,
+        enable_builtin,
+        socks_enabled,
+        http_enabled,
+        enable_dns_settings,
+        multi_proxy_listeners,
+    ) = (
         Some(verge_arc.get_valid_clash_core()),
         enable_tun_mode.unwrap_or(false),
         enable_builtin_enhanced.unwrap_or(true),
         verge_socks_enabled.unwrap_or(false),
         verge_http_enabled.unwrap_or(false),
         enable_dns_settings.unwrap_or(false),
+        multi_proxy_listeners.clone().unwrap_or_default(),
     );
 
     #[cfg(not(target_os = "windows"))]
@@ -145,6 +156,7 @@ async fn get_config_values() -> ConfigValues {
         socks_enabled,
         http_enabled,
         enable_dns_settings,
+        multi_proxy_listeners,
         #[cfg(not(target_os = "windows"))]
         redir_enabled,
         #[cfg(target_os = "linux")]
@@ -680,6 +692,227 @@ async fn apply_dns_settings(mut config: Mapping, enable_dns_settings: bool) -> M
     config
 }
 
+fn append_sequence(config: &mut Mapping, key: &str, values: Vec<Value>) {
+    if values.is_empty() {
+        return;
+    }
+    let mut sequence = config
+        .get(key)
+        .and_then(Value::as_sequence)
+        .cloned()
+        .unwrap_or_default();
+    sequence.extend(values);
+    config.insert(key.into(), Value::Sequence(sequence));
+}
+
+fn scoped_listener_name(profile_uid: &str, name: &str) -> std::string::String {
+    format!("__listener_{profile_uid}__{name}")
+}
+
+fn listener_profile_names(mapping: &Mapping) -> HashSet<String> {
+    ["proxies", "proxy-groups"]
+        .into_iter()
+        .filter_map(|key| mapping.get(key).and_then(Value::as_sequence))
+        .flatten()
+        .filter_map(|item| item.get("name").and_then(Value::as_str))
+        .map(Into::into)
+        .collect()
+}
+
+fn merge_listener_profile(config: &mut Mapping, profile_uid: &str, profile: Mapping) -> HashSet<String> {
+    let names = listener_profile_names(&profile);
+    let provider_names: HashSet<String> = profile
+        .get("proxy-providers")
+        .and_then(Value::as_mapping)
+        .into_iter()
+        .flat_map(|providers| providers.keys())
+        .filter_map(Value::as_str)
+        .map(Into::into)
+        .collect();
+
+    let proxies = profile
+        .get("proxies")
+        .and_then(Value::as_sequence)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_mapping)
+        .map(|item| {
+            let mut item = item.clone();
+            if let Some(name) = item.get("name").and_then(Value::as_str) {
+                item.insert("name".into(), scoped_listener_name(profile_uid, name).into());
+            }
+            Value::Mapping(item)
+        })
+        .collect();
+    append_sequence(config, "proxies", proxies);
+
+    let groups = profile
+        .get("proxy-groups")
+        .and_then(Value::as_sequence)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_mapping)
+        .map(|item| {
+            let mut item = item.clone();
+            if let Some(name) = item.get("name").and_then(Value::as_str) {
+                item.insert("name".into(), scoped_listener_name(profile_uid, name).into());
+            }
+            for key in ["proxies", "use"] {
+                if let Some(values) = item.get(key).and_then(Value::as_sequence).cloned() {
+                    let names_to_scope = if key == "proxies" { &names } else { &provider_names };
+                    let values = values
+                        .into_iter()
+                        .map(|value| match value.as_str() {
+                            Some(name) if names_to_scope.contains(name) => {
+                                scoped_listener_name(profile_uid, name).into()
+                            }
+                            _ => value,
+                        })
+                        .collect();
+                    item.insert(key.into(), Value::Sequence(values));
+                }
+            }
+            Value::Mapping(item)
+        })
+        .collect();
+    append_sequence(config, "proxy-groups", groups);
+
+    if let Some(providers) = profile.get("proxy-providers").and_then(Value::as_mapping) {
+        let mut merged = config
+            .get("proxy-providers")
+            .and_then(Value::as_mapping)
+            .cloned()
+            .unwrap_or_default();
+        for (name, value) in providers {
+            if let Some(name) = name.as_str() {
+                merged.insert(scoped_listener_name(profile_uid, name).into(), value.clone());
+            }
+        }
+        config.insert("proxy-providers".into(), Value::Mapping(merged));
+    }
+
+    names
+}
+
+async fn load_listener_profiles(
+    listeners: &[IMultiProxyListener],
+) -> Result<(Option<String>, HashMap<String, Mapping>)> {
+    let requested: HashSet<String> = listeners
+        .iter()
+        .filter(|listener| listener.enabled.unwrap_or(true))
+        .filter_map(|listener| listener.profile_uid.clone())
+        .collect();
+    if requested.is_empty() {
+        return Ok((None, HashMap::new()));
+    }
+
+    let profiles = Config::profiles().await;
+    let profiles = profiles.latest_arc();
+    let current = profiles.get_current().cloned();
+    let mut mappings = HashMap::new();
+    for uid in requested {
+        if current.as_ref() == Some(&uid) {
+            continue;
+        }
+        let item = profiles
+            .get_item(&uid)
+            .with_context(|| format!("failed to find multi-port profile \"{uid}\""))?;
+        if !matches!(item.itype.as_deref(), Some("local") | Some("remote")) {
+            anyhow::bail!("multi-port profile \"{uid}\" is not a local or remote profile");
+        }
+        let file = item
+            .file
+            .as_ref()
+            .with_context(|| format!("multi-port profile \"{uid}\" has no file"))?;
+        let path = dirs::app_profiles_dir()?.join(file.as_str());
+        mappings.insert(uid, help::read_mapping(&path).await?);
+    }
+    Ok((current, mappings))
+}
+
+async fn apply_multi_proxy_listeners(mut config: Mapping, listeners: Vec<IMultiProxyListener>) -> Result<Mapping> {
+    if listeners.is_empty() {
+        return Ok(config);
+    }
+
+    let (current_profile_uid, profile_mappings) = load_listener_profiles(&listeners).await?;
+    let mut profile_targets = HashMap::new();
+    for (uid, mapping) in profile_mappings {
+        profile_targets.insert(uid.clone(), merge_listener_profile(&mut config, &uid, mapping));
+    }
+
+    let reserved_ports: HashSet<u16> = [
+        "mixed-port",
+        "socks-port",
+        "port",
+        #[cfg(not(target_os = "windows"))]
+        "redir-port",
+        #[cfg(target_os = "linux")]
+        "tproxy-port",
+    ]
+    .into_iter()
+    .filter_map(|key| config.get(key).and_then(Value::as_u64))
+    .filter_map(|port| u16::try_from(port).ok())
+    .collect();
+
+    let mut names = HashSet::new();
+    let mut ports = HashSet::new();
+    let mut result = Vec::new();
+
+    for listener in listeners.into_iter().filter(|item| item.enabled.unwrap_or(true)) {
+        let name = listener.name.trim();
+        let proxy = listener.proxy.trim();
+        let listener_type = listener.r#type.trim();
+        let listen = listener.listen.as_deref().unwrap_or("127.0.0.1").trim();
+        if name.is_empty() || proxy.is_empty() {
+            anyhow::bail!("multi-port listener requires a name and an outbound proxy/group");
+        }
+        if !matches!(listener_type, "mixed" | "socks" | "http") {
+            anyhow::bail!("unsupported multi-port listener type: {listener_type}");
+        }
+        if listener.port == 0 {
+            anyhow::bail!("multi-port listener \"{name}\" has an invalid port");
+        }
+        if !names.insert(name.to_owned()) {
+            anyhow::bail!("duplicate multi-port listener name: {name}");
+        }
+        if !ports.insert(listener.port) {
+            anyhow::bail!("duplicate multi-port listener port: {}", listener.port);
+        }
+        if reserved_ports.contains(&listener.port) {
+            anyhow::bail!(
+                "multi-port listener \"{name}\" conflicts with an app-managed proxy port: {}",
+                listener.port
+            );
+        }
+
+        let mut item = Mapping::new();
+        item.insert("name".into(), name.into());
+        item.insert("type".into(), listener_type.into());
+        item.insert("port".into(), listener.port.into());
+        item.insert("listen".into(), listen.into());
+        let target = listener
+            .profile_uid
+            .as_ref()
+            .filter(|uid| current_profile_uid.as_ref() != Some(*uid))
+            .and_then(|uid| {
+                profile_targets
+                    .get(uid)
+                    .filter(|targets| targets.contains(proxy))
+                    .map(|_| scoped_listener_name(uid, proxy))
+            })
+            .unwrap_or_else(|| proxy.into());
+        item.insert("proxy".into(), target.into());
+        if matches!(listener_type, "mixed" | "socks") {
+            item.insert("udp".into(), listener.udp.unwrap_or(true).into());
+        }
+        result.push(Value::Mapping(item));
+    }
+
+    config.insert("listeners".into(), Value::Sequence(result));
+    Ok(config)
+}
+
 /// Enhance mode
 /// 返回最终订阅、该订阅包含的键、和script执行的结果
 pub async fn enhance() -> Result<(Mapping, HashSet<String>, HashMap<String, ResultLog>)> {
@@ -693,6 +926,7 @@ pub async fn enhance() -> Result<(Mapping, HashSet<String>, HashMap<String, Resu
         socks_enabled,
         http_enabled,
         enable_dns_settings,
+        multi_proxy_listeners,
         #[cfg(not(target_os = "windows"))]
         redir_enabled,
         #[cfg(target_os = "linux")]
@@ -762,6 +996,7 @@ pub async fn enhance() -> Result<(Mapping, HashSet<String>, HashMap<String, Resu
     // 手动覆盖后恢复 app 权威字段。
     let config = enforce_control_plane(config, control_plane);
     let config = enforce_dns_ipv6(config, dns_ipv6);
+    let config = apply_multi_proxy_listeners(config, multi_proxy_listeners).await?;
     let config = ensure_lan_bind_address(config);
 
     let config = cleanup_proxy_groups(config);
@@ -777,9 +1012,10 @@ pub async fn enhance() -> Result<(Mapping, HashSet<String>, HashMap<String, Resu
 #[cfg(test)]
 mod tests {
     use super::{
-        ChainItem, ChainType, cleanup_proxy_groups, ensure_lan_bind_address, process_global_items,
-        process_profile_items, use_keys,
+        ChainItem, ChainType, apply_multi_proxy_listeners, cleanup_proxy_groups, ensure_lan_bind_address,
+        merge_listener_profile, process_global_items, process_profile_items, use_keys,
     };
+    use crate::config::IMultiProxyListener;
     use std::collections::HashMap;
 
     fn mapping(yaml: &str) -> serde_yaml_ng::Mapping {
@@ -926,6 +1162,91 @@ mod tests {
                 .and_then(|seq| seq.first())
                 .and_then(serde_yaml_ng::Value::as_str),
             Some("8.8.8.8")
+        );
+    }
+
+    #[tokio::test]
+    async fn multi_proxy_listeners_are_generated_and_validated() {
+        let config = mapping(r#"{mixed-port: 7897, proxies: []}"#);
+        let listeners = vec![IMultiProxyListener {
+            name: "work".into(),
+            r#type: "mixed".into(),
+            port: 10080,
+            proxy: "Imported".into(),
+            profile_uid: None,
+            listen: None,
+            udp: Some(true),
+            enabled: Some(true),
+        }];
+
+        let result = apply_multi_proxy_listeners(config, listeners)
+            .await
+            .expect("listener should be valid");
+        let listener = result
+            .get("listeners")
+            .and_then(serde_yaml_ng::Value::as_sequence)
+            .and_then(|listeners| listeners.first())
+            .expect("listener should be generated");
+        assert_eq!(
+            listener.get("name").and_then(serde_yaml_ng::Value::as_str),
+            Some("work")
+        );
+        assert_eq!(listener.get("port").and_then(serde_yaml_ng::Value::as_u64), Some(10080));
+        assert_eq!(
+            listener.get("proxy").and_then(serde_yaml_ng::Value::as_str),
+            Some("Imported")
+        );
+        assert_eq!(
+            listener.get("listen").and_then(serde_yaml_ng::Value::as_str),
+            Some("127.0.0.1")
+        );
+
+        let conflict = vec![IMultiProxyListener {
+            name: "conflict".into(),
+            r#type: "socks".into(),
+            port: 7897,
+            proxy: "Imported".into(),
+            ..IMultiProxyListener::default()
+        }];
+        assert!(
+            apply_multi_proxy_listeners(mapping(r#"{mixed-port: 7897}"#), conflict)
+                .await
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn listener_profile_nodes_and_groups_are_namespaced() {
+        let mut config = mapping(r#"{proxies: [{name: shared, type: ss}], proxy-groups: []}"#);
+        let listener_profile = mapping(
+            r#"{
+                proxies: [{name: shared, type: ss, server: example.com, port: 443, cipher: aes-128-gcm, password: test}],
+                proxy-groups: [{name: Proxy, type: select, proxies: [shared, DIRECT]}]
+            }"#,
+        );
+
+        let names = merge_listener_profile(&mut config, "Lsecond", listener_profile);
+        assert!(names.contains("shared"));
+        assert!(names.contains("Proxy"));
+        assert_eq!(
+            config
+                .get("proxies")
+                .and_then(serde_yaml_ng::Value::as_sequence)
+                .and_then(|proxies| proxies.get(1))
+                .and_then(|proxy| proxy.get("name"))
+                .and_then(serde_yaml_ng::Value::as_str),
+            Some("__listener_Lsecond__shared")
+        );
+        assert_eq!(
+            config
+                .get("proxy-groups")
+                .and_then(serde_yaml_ng::Value::as_sequence)
+                .and_then(|groups| groups.first())
+                .and_then(|group| group.get("proxies"))
+                .and_then(serde_yaml_ng::Value::as_sequence)
+                .and_then(|proxies| proxies.first())
+                .and_then(serde_yaml_ng::Value::as_str),
+            Some("__listener_Lsecond__shared")
         );
     }
 

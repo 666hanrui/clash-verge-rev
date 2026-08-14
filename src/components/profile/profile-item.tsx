@@ -50,6 +50,7 @@ import { debugLog } from '@/utils/debug'
 import parseTraffic from '@/utils/parse-traffic'
 
 import { ProfileBox } from './profile-box'
+import { ProfilePortControls } from './profile-port-controls'
 import { ProxiesEditorViewer } from './proxies-editor-viewer'
 import { QrViewer } from './qr-viewer'
 const round = keyframes`
@@ -846,6 +847,7 @@ const ProfileItemBase = (props: ProfileItemProps) => {
           value={progress}
           style={{ opacity: total > 0 ? 1 : 0 }}
         />
+        {hasUrl && <ProfilePortControls profile={itemData} />}
       </ProfileBox>
 
       <Menu

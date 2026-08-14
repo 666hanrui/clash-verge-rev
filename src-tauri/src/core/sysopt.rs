@@ -8,6 +8,8 @@ use parking_lot::RwLock;
 use scopeguard::defer;
 use smartstring::alias::String;
 use std::{
+    process::Command,
+    string::String as StdString,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -73,6 +75,149 @@ async fn get_bypass() -> String {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn shell_single_quote(value: &str) -> StdString {
+    format!("'{}'", value.replace('\'', r"'\\''"))
+}
+
+#[cfg(target_os = "macos")]
+fn escape_osascript_double_quoted_string(value: &str) -> StdString {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// `networksetup` changes require administrator rights on current macOS
+/// versions. Resolve the active service first, then request authorization once
+/// for the complete update instead of exposing its raw permission error to the
+/// user (or asking once for every HTTP/SOCKS/PAC command).
+#[cfg(target_os = "macos")]
+fn active_network_service() -> Result<StdString> {
+    let route = Command::new("/sbin/route").args(["-n", "get", "default"]).output()?;
+    let route_output = StdString::from_utf8_lossy(&route.stdout);
+    let route_device = route_output
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("interface: "))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+
+    // A local TUN/VPN becomes the default route on macOS. It has no
+    // `networksetup` service of its own, so select the first physical network
+    // interface reported by scutil instead (for example en0 / Wi-Fi).
+    let device = match route_device.filter(|value| !value.starts_with("utun")) {
+        Some(device) => device,
+        None => {
+            let nwi = Command::new("/usr/sbin/scutil").arg("--nwi").output()?;
+            let nwi_output = StdString::from_utf8_lossy(&nwi.stdout);
+            nwi_output
+                .lines()
+                .find_map(|line| line.trim().strip_prefix("Network interfaces: "))
+                .and_then(|interfaces| {
+                    interfaces
+                        .split_whitespace()
+                        .find(|interface| !interface.starts_with("utun"))
+                })
+                .map(str::to_owned)
+                .ok_or_else(|| anyhow::anyhow!("无法识别当前物理网络接口"))?
+        }
+    };
+
+    let services = Command::new("/usr/sbin/networksetup")
+        .arg("-listnetworkserviceorder")
+        .output()?;
+    let service_output = StdString::from_utf8_lossy(&services.stdout);
+    let lines = service_output.lines().collect::<Vec<_>>();
+    let marker = format!("Device: {device})");
+
+    for (index, line) in lines.iter().enumerate() {
+        if !line.contains(&marker) {
+            continue;
+        }
+        if let Some(name) = lines[..index].iter().rev().find_map(|candidate| {
+            let candidate = candidate.trim();
+            if !candidate.starts_with('(') || candidate.starts_with("(Hardware Port:") {
+                return None;
+            }
+            candidate
+                .find(')')
+                .map(|end| candidate[end + 1..].trim())
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+        }) {
+            return Ok(name);
+        }
+    }
+
+    Err(anyhow::anyhow!("无法找到默认网络接口 {device} 对应的网络服务"))
+}
+
+#[cfg(target_os = "macos")]
+fn apply_macos_proxy_with_authorization(sys: &Sysproxy, auto: &Autoproxy) -> Result<()> {
+    let service = active_network_service()?;
+    let setup = "/usr/sbin/networksetup";
+    let mut commands: Vec<StdString> = Vec::new();
+    let mut push = |args: Vec<StdString>| {
+        commands.push(
+            std::iter::once(StdString::from(setup))
+                .chain(args)
+                .map(|value| shell_single_quote(&value))
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
+    };
+
+    push(vec![
+        "-setautoproxyurl".into(),
+        service.clone(),
+        if auto.url.is_empty() {
+            "".into()
+        } else {
+            auto.url.clone()
+        },
+    ]);
+    push(vec![
+        "-setautoproxystate".into(),
+        service.clone(),
+        if auto.enable { "on".into() } else { "off".into() },
+    ]);
+    for (set_command, state_command) in [
+        ("-setsocksfirewallproxy", "-setsocksfirewallproxystate"),
+        ("-setsecurewebproxy", "-setsecurewebproxystate"),
+        ("-setwebproxy", "-setwebproxystate"),
+    ] {
+        push(vec![
+            set_command.into(),
+            service.clone(),
+            sys.host.to_string(),
+            sys.port.to_string(),
+        ]);
+        push(vec![
+            state_command.into(),
+            service.clone(),
+            if sys.enable { "on".into() } else { "off".into() },
+        ]);
+    }
+    let mut bypass: Vec<StdString> = vec!["-setproxybypassdomains".into(), service];
+    bypass.extend(
+        sys.bypass
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned),
+    );
+    push(bypass);
+
+    let shell = escape_osascript_double_quoted_string(&commands.join("; "));
+    let prompt =
+        escape_osascript_double_quoted_string("Clash Hev needs administrator permission to update the system proxy");
+    let script = format!(r#"do shell script "{shell}" with administrator privileges with prompt "{prompt}""#,);
+    let output = Command::new("/usr/bin/osascript").args(["-e", &script]).output()?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let detail = StdString::from_utf8_lossy(&output.stderr).trim().to_owned();
+    anyhow::bail!("系统代理授权未完成: {detail}")
+}
+
 singleton!(Sysopt, SYSOPT);
 
 impl Sysopt {
@@ -129,10 +274,24 @@ impl Sysopt {
         let _lock = self.update_lock.lock().await;
 
         let verge = Config::verge().await.latest_arc();
-        let port = match verge.verge_mixed_port {
-            Some(port) => port,
-            None => Config::clash().await.latest_arc().get_mixed_port(),
-        };
+        let default_port = Config::clash().await.latest_arc().get_mixed_port();
+        let selected_listener = verge.system_proxy_listener.as_deref().and_then(|name| {
+            verge.multi_proxy_listeners.as_ref().and_then(|listeners| {
+                listeners.iter().find(|listener| {
+                    listener.name == name
+                        && listener.enabled.unwrap_or(true)
+                        && matches!(listener.r#type.as_str(), "mixed" | "http")
+                })
+            })
+        });
+        let port = selected_listener
+            .map(|listener| listener.port)
+            .or(verge.verge_mixed_port)
+            .unwrap_or(default_port);
+        let proxy_host = selected_listener
+            .and_then(|listener| listener.listen.as_deref())
+            .or(verge.proxy_host.as_deref())
+            .unwrap_or("127.0.0.1");
         let pac_port = IVerge::get_singleton_port();
         // 先 await, 避免持有锁导致的 Send 问题
         let bypass = get_bypass().await;
@@ -140,7 +299,7 @@ impl Sysopt {
         let (sys_enable, pac_enable, proxy_host, proxy_guard) = (
             verge.enable_system_proxy.unwrap_or_default(),
             verge.proxy_auto_config.unwrap_or_default(),
-            verge.proxy_host.as_deref().unwrap_or("127.0.0.1"),
+            proxy_host,
             verge.enable_proxy_guard.unwrap_or_default(),
         );
 
@@ -183,13 +342,27 @@ impl Sysopt {
         let apply_steps = proxy_apply_steps(sys.enable, auto.enable);
 
         tokio::task::spawn_blocking(move || -> Result<()> {
-            for step in apply_steps {
-                match step {
-                    ProxyApplyStep::Autoproxy => auto.set_auto_proxy()?,
-                    ProxyApplyStep::Sysproxy => sys.set_system_proxy()?,
+            let apply_result = (|| -> sysproxy::Result<()> {
+                for step in apply_steps {
+                    match step {
+                        ProxyApplyStep::Autoproxy => auto.set_auto_proxy()?,
+                        ProxyApplyStep::Sysproxy => sys.set_system_proxy()?,
+                    }
                 }
+                Ok(())
+            })();
+
+            #[cfg(target_os = "macos")]
+            if sys_enable
+                && matches!(
+                    apply_result,
+                    Err(sysproxy::Error::RequiresAdminPrivileges | sysproxy::Error::NetworkInterface)
+                )
+            {
+                return apply_macos_proxy_with_authorization(&sys, &auto);
             }
-            Ok(())
+
+            apply_result.map_err(Into::into)
         })
         .await??;
 
