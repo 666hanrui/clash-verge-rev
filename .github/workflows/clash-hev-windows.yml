@@ -1,0 +1,41 @@
+name: Package Clash Hev for Windows
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: pnpm/action-setup@v6
+        with:
+          run_install: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.18.0
+          cache: pnpm
+
+      - name: Install dependencies and Windows sidecars
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run prebuild x86_64-pc-windows-msvc
+
+      - name: Build NSIS installer
+        run: pnpm tauri build --target x86_64-pc-windows-msvc --bundles nsis
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v7
+        with:
+          name: Clash-Hev-Windows-x64-Setup
+          path: target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+          if-no-files-found: error
