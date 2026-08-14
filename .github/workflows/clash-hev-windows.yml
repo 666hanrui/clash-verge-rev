@@ -34,7 +34,7 @@ jobs:
         # This fork does not carry the upstream auto-update signing key. The
         # NSIS installer itself is unsigned-but-valid, so disable updater
         # artifacts rather than failing after the installer has been built.
-        run: pnpm tauri build --target x86_64-pc-windows-msvc --bundles nsis --config src-tauri/tauri.windows.package.conf.json
+        run: pnpm tauri build --target x86_64-pc-windows-msvc --bundles nsis --config src-tauri/tauri.windows.package.conf.json -- --profile fast-release
 
       - name: Upload installer
         uses: actions/upload-artifact@v7
